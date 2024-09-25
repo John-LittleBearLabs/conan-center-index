@@ -304,9 +304,6 @@ class QtConan(ConanFile):
         if Version(self.version) >= "6.6.1" and self.settings.compiler == "apple-clang" and Version(self.settings.compiler.version) < "13.1":
             raise ConanInvalidConfiguration("apple-clang >= 13.1 is required by qt >= 6.6.1 cf QTBUG-119490")
 
-        if self.settings.os == "Macos" and self.dependencies["double-conversion"].options.shared:
-            raise ConanInvalidConfiguration("Test recipe fails because of Macos' SIP. Contributions are welcome.")
-
         if self.options.get_safe("qtwebengine"):
             if not self.options.shared:
                 raise ConanInvalidConfiguration("Static builds of Qt WebEngine are not supported")
@@ -366,7 +363,12 @@ class QtConan(ConanFile):
         if self.options.with_pcre2:
             self.requires("pcre2/10.42")
         if self.options.get_safe("with_vulkan"):
-            self.requires("vulkan-loader/1.3.268.0")
+            # Note: the versions of vulkan-loader and moltenvk
+            #       must be exactly part of the same Vulkan SDK version
+            #       do not update either without checking both
+            #       require exactly the same version of vulkan-headers
+            self.requires("vulkan-loader/1.3.239.0")
+            self.requires("vulkan-headers/1.3.239.0", transitive_headers=True)
             if is_apple_os(self):
                 self.requires("moltenvk/1.2.2")
         if self.options.with_glib:
@@ -560,6 +562,9 @@ class QtConan(ConanFile):
         if not self.options.with_zstd:
             tc.variables["CMAKE_DISABLE_FIND_PACKAGE_WrapZSTD"] = "ON"
 
+        if not self.options.get_safe("with_vulkan"):
+            tc.variables["CMAKE_DISABLE_FIND_PACKAGE_WrapVulkanHeaders"] = "ON"
+
         # Prevent finding LibClang from the system
         # this is needed by the QDoc tool inside Qt Tools
         # See: https://github.com/conan-io/conan-center-index/issues/24729#issuecomment-2255291495
@@ -721,6 +726,13 @@ class QtConan(ConanFile):
                         "qt_auto_detect_vcpkg()",
                         "# qt_auto_detect_vcpkg()")
 
+        # Handle locating moltenvk headers when vulkan is enabled on macOS
+        replace_in_file(self, os.path.join(self.source_folder, "qtbase", "cmake", "FindWrapVulkanHeaders.cmake"),
+        "if(APPLE)", "if(APPLE)\n"
+                    " find_package(moltenvk REQUIRED QUIET)\n"
+                    " target_include_directories(WrapVulkanHeaders::WrapVulkanHeaders INTERFACE ${moltenvk_INCLUDE_DIR})"
+        )
+
     def _xplatform(self):
         if self.settings.os == "Linux":
             if self.settings.compiler == "gcc":
@@ -842,8 +854,6 @@ class QtConan(ConanFile):
         if self.settings.os == "Macos":
             save(self, ".qmake.stash", "")
             save(self, ".qmake.super", "")
-            copy(self, "Info.plist.app.in", src=os.path.join(self.package_folder, "lib", "cmake", "Qt6", "macos"),
-                                            dst=os.path.join(self.package_folder, "res", "macos"))
         cmake = CMake(self)
         cmake.install()
         copy(self, "*LICENSE*", self.source_folder, os.path.join(self.package_folder, "licenses"),
@@ -879,7 +889,7 @@ class QtConan(ConanFile):
         filecontents += f"set(QT_VERSION_MINOR {ver.minor})\n"
         filecontents += f"set(QT_VERSION_PATCH {ver.patch})\n"
         if self.settings.os == "Macos":
-            filecontents += f'set(__qt_internal_cmake_apple_support_files_path "${{CMAKE_CURRENT_LIST_DIR}}/../../../res/macos")\n'
+            filecontents += 'set(__qt_internal_cmake_apple_support_files_path "${CMAKE_CURRENT_LIST_DIR}/../../../lib/cmake/Qt6/macos")\n'
         targets = ["moc", "rcc", "tracegen", "cmake_automoc_parser", "qlalr", "qmake"]
         if self.options.with_dbus:
             targets.extend(["qdbuscpp2xml", "qdbusxml2cpp"])
@@ -1118,6 +1128,7 @@ class QtConan(ConanFile):
                 gui_reqs.append("opengl::opengl")
             if self.options.get_safe("with_vulkan", False):
                 gui_reqs.append("vulkan-loader::vulkan-loader")
+                gui_reqs.append("vulkan-headers::vulkan-headers")
                 if is_apple_os(self):
                     gui_reqs.append("moltenvk::moltenvk")
             if self.options.with_harfbuzz:
